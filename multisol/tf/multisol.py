@@ -129,6 +129,10 @@ def SOL(
             )
 
         def _from_rank2():
+            static_last_dim = y_true.shape[1]
+            if static_last_dim is not None and static_last_dim != 1:
+                return tf.cast(y_true, tf.float32)
+
             def _sparse_col():
                 return tf.cond(
                     tf.equal(num_classes, 1),
@@ -140,7 +144,8 @@ def SOL(
                     ),
                 )
 
-            return tf.cond(tf.equal(tf.shape(y_true)[1], 1), _sparse_col, lambda: tf.cast(y_true, tf.float32))
+            last_dim = tf.shape(y_true)[1]
+            return tf.cond(tf.equal(last_dim, 1), _sparse_col, lambda: tf.cast(y_true, tf.float32))
 
         y_true = tf.cond(
             tf.equal(y_true_rank, 1),
