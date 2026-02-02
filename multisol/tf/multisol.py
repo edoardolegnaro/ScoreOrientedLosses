@@ -1,8 +1,4 @@
-import math
-from joblib import Parallel, delayed
-
 import tensorflow as tf
-import numpy as np
 
 from multisol.tf.metrics import (
     accuracy,
@@ -39,10 +35,6 @@ def multiclass_indicator(y_pred, taus, lam=10.0):
     Returns:
        psi: Tensor of shape (B, m) with the differentiable assignment probabilities.
     """
-    # Use static shape if available.
-    m_static = y_pred.shape[1]
-    m_static if m_static is not None else tf.shape(y_pred)[1]
-
     # Compute pairwise differences for predictions: shape (B, m, m).
     diff_y = y_pred[:, :, None] - y_pred[:, None, :]
 
@@ -67,46 +59,17 @@ def multiclass_indicator(y_pred, taus, lam=10.0):
 # ============================================================================
 # SOL Loss Function for Multi-class (one-vs-rest) case
 # ============================================================================
-tf.config.optimizer.set_jit(True)
+# Avoid setting global XLA/JIT at import time; it can break gradients on some
+# CPU setups. Enable it explicitly in your training script if desired.
+# tf.config.optimizer.set_jit(True)
 
-
-def count_condition_satisfied(x, i, taus):
-    """
-    Count how many Dirichlet samples satisfy the condition:
-    x_i - x_j > tau^k_i - tau^k_j for all j ≠ i, using optimization.
-
-    Parameters:
-        x (list): Point in the simplex.
-        i (int): Fixed component.
-        taus (ndarray): Dirichlet samples, shape (N, d).
-
-    Returns:
-        int: Count of samples satisfying the condition.
-    """
-    N, d = taus.shape
-
-    # Compute differences: x_i - x_j for all j ≠ i
-    x_diff = x[i] - x  # Shape (d,)
-
-    def check_condition_for_tau(tau):
-        # Check the condition for all j ≠ i for a single tau sample
-        for j in range(d):
-            if j == i:
-                continue
-            if not (x_diff[j] > (tau[i] - tau[j])):
-                return False
-        return True
-
-    # Use parallel processing to evaluate the condition for all tau samples
-    condition_satisfied = Parallel(n_jobs=-1)(delayed(check_condition_for_tau)(tau) for tau in taus)
-
-    # Return the count of samples that satisfy the condition
-    return np.sum(condition_satisfied)
 
 def SOL(
     score="accuracy",
     taus=None,
     lam=10.0,
+    *,
+    add_one=True,
 ):
     """
     Score-Oriented Loss (SOL) for multi-class classification.
@@ -116,14 +79,17 @@ def SOL(
 
     Parameters:
       score:        String indicating the score (e.g., 'accuracy').
-      mu, delta:    Parameters for the cosine distribution (ignored if 'uniform').
-      mode:         'average' for macro averaging.
       taus:         A NumPy array or tensor of shape (N, m) containing tau samples.
       lam:          Sigmoid steepness parameter.
+      add_one:      If True, returns (1 - score) instead of (-score). This is a
+                    constant offset and does not change gradients/optima.
 
     Returns:
       A loss function SOL_(y_true, y_pred) for model.compile.
     """
+    if taus is None:
+        raise ValueError("`taus` must be provided (shape (N, m)).")
+
     # Select score function from metrics.
     if score == "accuracy":
         score_func = accuracy
@@ -149,13 +115,47 @@ def SOL(
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.cast(y_pred, tf.float32)
 
+        # Support sparse labels (B,) or (B, 1):
+        # - If y_pred is multiclass (B, m), convert indices -> one-hot (B, m).
+        # - If y_pred is binary (B, 1), keep labels as (B, 1) float in {0,1}.
+        num_classes = tf.shape(y_pred)[1]
+        y_true_rank = tf.rank(y_true)
+
+        def _from_rank1():
+            return tf.cond(
+                tf.equal(num_classes, 1),
+                lambda: tf.cast(tf.expand_dims(y_true, axis=-1), tf.float32),
+                lambda: tf.one_hot(tf.cast(y_true, tf.int32), depth=num_classes, dtype=tf.float32),
+            )
+
+        def _from_rank2():
+            def _sparse_col():
+                return tf.cond(
+                    tf.equal(num_classes, 1),
+                    lambda: tf.cast(y_true, tf.float32),
+                    lambda: tf.one_hot(
+                        tf.cast(tf.squeeze(y_true, axis=1), tf.int32),
+                        depth=num_classes,
+                        dtype=tf.float32,
+                    ),
+                )
+
+            return tf.cond(tf.equal(tf.shape(y_true)[1], 1), _sparse_col, lambda: tf.cast(y_true, tf.float32))
+
+        y_true = tf.cond(
+            tf.equal(y_true_rank, 1),
+            _from_rank1,
+            lambda: tf.cond(tf.equal(y_true_rank, 2), _from_rank2, lambda: tf.cast(y_true, tf.float32)),
+        )
+
         # Binary classification branch.
         if y_pred.shape[1] == 1:
             TN = tf.reduce_sum((1.0 - y_true) * (1.0 - y_pred))
             TP = tf.reduce_sum(y_true * y_pred)
             FP = tf.reduce_sum((1.0 - y_true) * y_pred)
             FN = tf.reduce_sum(y_true * (1.0 - y_pred))
-            return -score_func(TN, FP, FN, TP) + 1.0
+            score_val = score_func(TN, FP, FN, TP)
+            return (1.0 - score_val) if add_one else (-score_val)
         else:
             # Multi-class branch.
             psi = multiclass_indicator(y_pred, taus, lam=lam)  # shape (B, m)
@@ -169,6 +169,6 @@ def SOL(
             # Compute the score per class and average.
             score_arr = score_func(TN, FP, FN, TP)
             final_score = tf.reduce_mean(score_arr)
-            return -final_score + 1.0
+            return (1.0 - final_score) if add_one else (-final_score)
 
     return SOL_

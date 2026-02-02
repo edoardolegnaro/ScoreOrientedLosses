@@ -18,4 +18,4 @@ def F_cos(x, mu, delta):
     )
 
 def pdf_F_cos(x, mu, delta):
-    return 1 / (2 * delta) * (1 + np.cos(np.pi * (x - mu) / delta))
+    return 1 / (2 * delta) * (1 + torch.cos(pi * (x - mu) / delta))

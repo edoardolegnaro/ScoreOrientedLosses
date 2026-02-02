@@ -3,12 +3,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from multisol.torch.metrics import (
-        accuracy as acc,
-        precision as prec,
-        recall as rec,
-        specificity as spec,
-        f1_score_fun as f1s,
-    )
+	        accuracy as acc,
+	        precision as prec,
+	        recall as rec,
+	        specificity as spec,
+	        f1_score_fun as f1s,
+	        tss as tss_score,
+	        gmean as gmean_score,
+	    )
 
 # ============================================================================
 # Differentiable Monte Carlo indicator for multi-class assignment
@@ -51,8 +53,18 @@ class SOL(nn.Module):
     This loss computes a soft one-vs-rest confusion matrix by approximating the
     indicator 1{ y_pred in R_j(τ) } via Monte Carlo integration over tau samples.
     """
-    def __init__(self, score="accuracy", distribution="uniform",
-                 mu=0.5, delta=0.1, mode="average", taus=None, lam=10.0):
+    def __init__(
+        self,
+        score="accuracy",
+        distribution="uniform",
+        mu=0.5,
+        delta=0.1,
+        mode="average",
+        taus=None,
+        lam=10.0,
+        *,
+        add_one=True,
+    ):
         """
         Parameters:
           score:        String indicating the score (e.g., 'accuracy', 'precision',
@@ -60,9 +72,11 @@ class SOL(nn.Module):
           distribution: Not used (tau samples are provided).
           mu, delta:    Parameters for the cosine distribution (ignored if 'uniform').
           mode:         'average' for macro averaging.
-          taus:         A NumPy array or tensor of shape (N, m) containing tau samples.
-          lam:          Sigmoid steepness parameter.
-        """
+	          taus:         A NumPy array or tensor of shape (N, m) containing tau samples.
+	          lam:          Sigmoid steepness parameter.
+	          add_one:      If True, returns (1 - score) instead of (-score). This is a
+	                        constant offset and does not change gradients/optima.
+	        """
         super(SOL, self).__init__()
         self.score = score
         self.distribution = distribution
@@ -70,6 +84,7 @@ class SOL(nn.Module):
         self.delta = delta
         self.mode = mode
         self.lam = lam
+        self.add_one = add_one
 
         # Set the score function.
         if score == "accuracy":
@@ -82,6 +97,10 @@ class SOL(nn.Module):
             self.score_func = spec
         elif score == "f1_score":
             self.score_func = f1s
+        elif score == "tss":
+            self.score_func = tss_score
+        elif score == "gmean":
+            self.score_func = gmean_score
         else:
             self.score_func = acc  # default
 
@@ -99,8 +118,18 @@ class SOL(nn.Module):
         y_pred: Tensor of shape (B, m) for multi-class or (B, 1) for binary.
         y_true: Tensor of the same shape as y_pred.
         """
-        y_true = y_true.float()
         y_pred = y_pred.float()
+
+        # Support sparse labels (B,) or (B, 1) by converting to one-hot.
+        if y_true.dim() == 1:
+            if y_pred.size(1) == 1:
+                y_true = y_true.view(-1, 1)
+            else:
+                y_true = F.one_hot(y_true.to(torch.long), num_classes=y_pred.size(1))
+        elif y_true.dim() == 2 and y_true.size(1) == 1 and y_pred.size(1) != 1:
+            y_true = F.one_hot(y_true.squeeze(1).to(torch.long), num_classes=y_pred.size(1))
+
+        y_true = y_true.to(device=y_pred.device, dtype=torch.float32)
 
         # Binary classification branch.
         if y_pred.size(1) == 1:
@@ -108,7 +137,8 @@ class SOL(nn.Module):
             TP = torch.sum(y_true * y_pred)
             FP = torch.sum((1.0 - y_true) * y_pred)
             FN = torch.sum(y_true * (1.0 - y_pred))
-            loss = -self.score_func(TN, FP, FN, TP) + 1.0
+            score_val = self.score_func(TN, FP, FN, TP)
+            loss = (1.0 - score_val) if self.add_one else (-score_val)
             return loss
         else:
             # Multi-class branch.
@@ -125,5 +155,5 @@ class SOL(nn.Module):
             # Compute the score per class and average.
             score_arr = self.score_func(TN, FP, FN, TP)
             final_score = torch.mean(score_arr)
-            loss = -final_score + 1.0
+            loss = (1.0 - final_score) if self.add_one else (-final_score)
             return loss
