@@ -6,8 +6,8 @@ Supports binary and multiclass classification settings.
 ## Installation
 
 ```bash
-git clone https://github.com/edoardolegnaro/SOL.git
-cd SOL
+git clone https://github.com/edoardolegnaro/ScoreOrientedLosses.git
+cd ScoreOrientedLosses
 pip install -e .
 ```
 
