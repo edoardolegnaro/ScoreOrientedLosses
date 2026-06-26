@@ -11,6 +11,11 @@ The reference paper for the `multisol` implementation is:
 Marchetti, F., Legnaro, E., & Guastavino, S. (2025). The Multiclass
 Score-Oriented Loss (MultiSOL) on the Simplex. arXiv preprint arXiv:2511.22587.
 
+The reference paper for the `wsol` implementation is:
+
+Legnaro, E., Guastavino, S., & Marchetti, F. (2026). Weighted Score-Oriented
+Losses for Temporally Localized Event Prediction. arXiv preprint arXiv:2606.23145.
+
 ## Installation
 
 ```bash
